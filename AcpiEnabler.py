@@ -31,6 +31,8 @@ from FileDownloader import download_kernel_packages
 from ShellUtils import run_command
 from SupportedVersions import dkms_acpi_enabled_strings
 from SupportedVersions import get_os_version
+from SupportedVersions import get_remote_kernel_modules_path
+from SupportedVersions import get_remote_kernel_headers_path
 from SupportedVersions import get_kernel_modules_filename
 from SupportedVersions import get_kernel_headers_filename
 from SupportedVersions import kernel_modules_packages
@@ -122,7 +124,9 @@ def enable_acpi_calls(dry_run):
     print('\nNow enabling ACPI calls on SteamOS for Legion Go')
 
     # 1. Download the require kernel packages
-    download_kernel_packages(kernel_modules_filename, kernel_headers_filename, dry_run)
+    remote_kernel_modules_filename = get_remote_kernel_modules_path(kernel_modules_filename)
+    remote_kernel_headers_filename = get_remote_kernel_headers_path(kernel_headers_filename)
+    download_kernel_packages(remote_kernel_modules_filename, remote_kernel_headers_filename, dry_run)
 
     # 2. Prepare SteamOS and package manager for the installation
     prep_steamos(dry_run)

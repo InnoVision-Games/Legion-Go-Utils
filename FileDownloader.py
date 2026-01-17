@@ -27,7 +27,7 @@
 from ShellUtils import run_command
 
 def download_kernel_packages(kernel_modules_filename, kernel_headers_filename, dry_run=True):
-    steam_packages_url = 'https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/'
+    steam_packages_url = 'https://steamdeck-packages.steamos.cloud/archlinux-mirror/'
     kernel_modules_url = steam_packages_url + kernel_modules_filename
     kernel_headers_url = steam_packages_url + kernel_headers_filename
 
