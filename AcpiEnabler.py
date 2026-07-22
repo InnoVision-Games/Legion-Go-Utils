@@ -110,7 +110,7 @@ def enable_acpi_calls(dry_run):
 
     # 1. Download the require kernel packages
     if not check_mirror_and_download_package(kernel_modules_filename):
-        print('The  SteamOS requested is not supported yet, please try again later or open a ticket')
+        print('The  SteamOS requested is not supported yet, please try again later or open a support ticket with Valve')
         sys.exit(-1)
     if not check_mirror_and_download_package(kernel_headers_filename):
         print('\nError kernel module package: %s not found on Valve\'s mirror.' % kernel_headers_filename)

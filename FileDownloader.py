@@ -49,5 +49,5 @@ def check_mirror_and_download_package(filename):
         print('File: %s, was downloaded successfully' % filename)
         return True
     except Exception as e:
-        print('Error, file: %s, not found on Valve\'s mirror, with error:  %s' % str(e))
+        print('Error, file: %s, not found on Valve\'s mirror, with error:  %s' % (filename, str(e)))
         return False
