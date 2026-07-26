@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
+
 '''
     MIT License
 
-    Copyright (c) 2025 InnoVision Games
+    Copyright (c) 2026 InnoVision Games
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -21,31 +23,18 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-    file: ShellUtils.py
+    file: nvidia_usb_image_builder/__init__.py
+
+    Re-exports NvidiaUsbImageBuilder so `from nvidia_usb_image_builder
+    import NvidiaUsbImageBuilder` (as used by steam_os_utils.py) keeps
+    working unchanged now that this is a package directory
+    (nvidia_usb_image_builder/, holding nvidia_usb_image_builder.py,
+    repatch_script.py, update_wrapper_script_builder.py, and
+    install_to_hd.sh) instead of a single flat module.
 '''
 
-import subprocess
-import shlex
+"""Package init: re-exports NvidiaUsbImageBuilder as the package's public API."""
 
-def run_command(command, dry_run=True, verbose=False):
-    result = None
-    try:
-        command = shlex.join(command)
-        if verbose:
-            print('Running command: %s.' % command)
-        if not dry_run:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
-                universal_newlines=True,
-            )
-            print(result.stdout)
-            print(result.stderr)
-    except subprocess.CalledProcessError as e:
-        print(f'Shell command failed with error: {e}')
-        print(f'Stderr: {e.stderr}')
+from .nvidia_usb_image_builder import NvidiaUsbImageBuilder
 
-    return result
+__all__ = ['NvidiaUsbImageBuilder']

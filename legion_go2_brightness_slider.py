@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 '''
     MIT License
 
@@ -21,33 +23,20 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-    file: FileDownloader.py
+    file: legion_go2_brightness_slider.py
 '''
 
-import os
-import shutil
-import socket
-import sys
-import time
-import urllib.request
+"""Legion Go 2 brightness slider and color-correction fix.
 
-# Set the global default timeout for all socket operations to 10 seconds
-socket.setdefaulttimeout(10)
+Currently stub implementations pending the real fix logic.
+"""
 
-# URL containing Valve's public mirror for SteamOS packages
-VALVE_PUBLIC_MIRROR = 'https://steamdeck-packages.steamos.cloud/archlinux-mirror/jupiter-main/os/x86_64/'
 
-# Function that checks for and downloads a specified file.
-def check_mirror_and_download_package(filename):
-    print('\nChecking Valve mirror for package: %s ...' % filename)
-    try:
-        remote_filename = os.path.join(VALVE_PUBLIC_MIRROR, filename)
-        req = urllib.request.Request(url=remote_filename)
-        with urllib.request.urlopen(req) as response:
-            with open(filename, 'wb') as f:
-                shutil.copyfileobj(response, f)
-        print('File: %s, was downloaded successfully' % filename)
-        return True
-    except Exception as e:
-        print('Error, file: %s, not found on Valve\'s mirror, with error:  %s' % (filename, str(e)))
-        return False
+def enable_lego2_brightness_slider():
+    """Enable the Legion Go 2 brightness slider and color-correction fix."""
+    print('stub enable_lego2_brightness_slider')
+
+
+def remove_lego2_brightness_slider():
+    """Disable and remove the Legion Go 2 brightness slider and color-correction fix."""
+    print('stub remove_lego2_brightness_slider')

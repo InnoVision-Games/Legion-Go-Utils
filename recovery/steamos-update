@@ -1,0 +1,56 @@
+#!/bin/bash
+# steamos-update wrapper (steamos-nvidia self-healing updates).
+# Runs Valve's real updater, then rebuilds the NVIDIA driver inside
+# the freshly staged OS slot. If that fails, the update is cancelled:
+# the bootloader keeps booting the current (working) image.
+REAL=/usr/bin/steamos-update.orig
+REPATCH=/usr/lib/steamos-nvidia/repatch.sh
+LOG=/var/log/steamos-nvidia-repatch.log
+
+is_apply=1
+for a in "$@"; do
+  case "$a" in check|--supports-duplicate-detection) is_apply=0 ;; esac
+done
+
+"$REAL" "$@"
+rc=$?
+
+# Edit the boot config of every slot EXCEPT the currently booted one.
+# The conf files on the ESP are plain text; editing them directly is
+# the only revert that reliably steers steamcl (set-mode booted does
+# NOT undo a staged switch, and a zeroed boot-requested-at still gets
+# retried while boot-attempts is nonzero — both verified the hard way
+# by the original author).
+edit_other_confs() {  # args: sed expressions
+  local this conf
+  this="$(steamos-bootconf this-image 2>/dev/null)" || return 0
+  [[ -n "$this" ]] || return 0
+  for conf in /esp/SteamOS/conf/*.conf; do
+    [[ -f "$conf" ]] || continue
+    [[ "$(basename "$conf" .conf)" == "$this" ]] && continue
+    sed -i "$@" "$conf"
+  done
+  sync -f /esp/SteamOS/conf 2>/dev/null || sync
+}
+
+if [[ $rc -eq 0 && $is_apply -eq 1 ]]; then
+  echo "Update staged. Building NVIDIA driver for the new OS (10-20 min, do NOT power off)..." >&2
+  if "$REPATCH" other >> "$LOG" 2>&1; then
+    echo "NVIDIA driver installed into the updated OS. Safe to reboot." >&2
+    # make sure the freshly patched slot is bootable (clears an
+    # image-invalid left by a previously cancelled update)
+    edit_other_confs -e 's/^image-invalid:.*/image-invalid: 0/'
+  else
+    echo "!! NVIDIA driver rebuild FAILED — cancelling this update." >&2
+    echo "!! The system will keep booting the current working version." >&2
+    echo "!! Details: $LOG" >&2
+    edit_other_confs \
+      -e 's/^boot-requested-at:.*/boot-requested-at: 0/' \
+      -e 's/^boot-attempts:.*/boot-attempts: 0/' \
+      -e 's/^image-invalid:.*/image-invalid: 1/'
+    steamos-bootconf set-mode booted 2>/dev/null
+    exit 1
+  fi
+fi
+exit $rc
+
