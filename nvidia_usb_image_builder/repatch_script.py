@@ -94,6 +94,12 @@ PARTSET = sys.argv[1] if len(sys.argv) > 1 else 'other'
 DRIVER_CONF_PATH = '/usr/lib/steamos-nvidia/driver.json'
 CMDLINE_ADD = 'rd.driver.blacklist=nouveau modprobe.blacklist=nouveau nvidia-drm.modeset=1 nvidia-drm.fbdev=1'
 BUILD_ONLY_RE = re.compile('^(dkms|nvidia-open-dkms|patch|gcc|gcc-libs|make|binutils|libisl|libmpc|mpfr|pahole|python-setuptools|linux-neptune.*-headers|.*-headers)$')
+# Matches NvidiaUsbImageBuilder.EDID_UNIT_NAME. The edid_hdr_patch.py
+# script itself needs no special handling here -- it lives under
+# /usr/lib/steamos-nvidia, which the generic copy loop below already
+# propagates into every new slot. Only the systemd unit, which by
+# convention lives outside that directory, needs its own copy+enable.
+EDID_UNIT_NAME = 'steamos-nvidia-edid-patch.service'
 
 
 def log(msg):
@@ -499,6 +505,27 @@ def main():
             shutil.move(str(new_bin), str(new_orig))
             shutil.copy2(str(src_bin), str(new_bin))
             new_bin.chmod(0o755)
+
+    # Propagate the EDID HDR safety net's systemd unit (the script itself
+    # was already carried over by the generic /usr/lib/steamos-nvidia
+    # copy loop above) so it keeps running after the NEXT update too.
+    # Direct symlink write, not `systemctl enable`: confirmed that the
+    # latter can report success without actually creating the *.wants
+    # symlink when run inside a plain chroot() lacking a booted systemd,
+    # a live /run tmpfs, or /etc/machine-id -- exactly NEWROOT's
+    # situation here (mirrors NvidiaUsbImageBuilder.configure_edid_hdr_safety()).
+    src_unit = Path('/usr/lib/systemd/system') / EDID_UNIT_NAME
+    if src_unit.exists():
+        dest_unit = NEWROOT / 'usr' / 'lib' / 'systemd' / 'system' / EDID_UNIT_NAME
+        dest_unit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_unit), str(dest_unit))
+        wants_dir = NEWROOT / 'etc' / 'systemd' / 'system' / 'multi-user.target.wants'
+        wants_dir.mkdir(parents=True, exist_ok=True)
+        enabled_link = wants_dir / EDID_UNIT_NAME
+        if enabled_link.exists() or enabled_link.is_symlink():
+            enabled_link.unlink()
+        enabled_link.symlink_to('/usr/lib/systemd/system/%s' % EDID_UNIT_NAME)
+
     oobe_service = (NEWROOT / 'usr' / 'lib' / 'systemd' / 'system'
                     / 'steamos-finish-oobe-migration.service')
     if oobe_service.exists():
