@@ -158,7 +158,7 @@ class AcpiEnabler:
                 runs.
         """
         self.verbose = verbose
-        self.workdir = Path(workdir) if workdir else Path('acpi-enabler-work')
+        self.workdir = Path(workdir) if workdir else Path('.acpi-enabler-work')
 
         self.os_version = None
         self.kernel_modules_filename = None
@@ -501,6 +501,33 @@ class AcpiEnabler:
         run_command(['sudo', 'mount', '--rbind', '/dev', str(merged / 'dev')], self.verbose)
         run_command(['sudo', 'mount', '--make-rslave', str(merged / 'dev')], self.verbose)
 
+        # dkms's bookkeeping tree at /var/lib/dkms has to be the REAL,
+        # persistent one on the host, not whatever lowerdir=/ resolves
+        # to at that path. Confirmed on real hardware: once dkms was
+        # already installed on the host (see _ensure_host_dkms()),
+        # `dkms add`/`dkms build` run INSIDE this overlay started
+        # failing immediately with "No write access to DKMS tree at
+        # /var/lib/dkms" -- almost certainly the same class of problem
+        # the explicit /proc, /sys, /dev rbind mounts above already
+        # exist to work around: /var lives on its own mount on
+        # SteamOS, and overlayfs's lowerdir=/ does not descend into a
+        # separate mount nested inside it -- it only sees whatever (if
+        # anything) sits at that path on the underlying root
+        # filesystem itself, which is not the writable, live /var.
+        # Bind mounting the real /var/lib/dkms straight through
+        # sidesteps that ambiguity entirely, and as a bonus means the
+        # build's dkms bookkeeping lands directly on the real host --
+        # no separate copy-back step needed for it afterwards (see
+        # install_acpi_call_module()).
+        host_dkms_root = Path('/var/lib/dkms')
+        host_dkms_root.mkdir(parents=True, exist_ok=True)
+        chroot_dkms_root = merged / 'var' / 'lib' / 'dkms'
+        run_command(['sudo', 'mkdir', '-p', str(chroot_dkms_root)], self.verbose)
+        run_command(
+            ['sudo', 'mount', '--bind', str(host_dkms_root), str(chroot_dkms_root)],
+            self.verbose,
+        )
+
         # /etc/resolv.conf on a systemd-based system is almost always a
         # symlink into /run/systemd/resolve/... , and /run is a tmpfs --
         # not part of the underlying root filesystem's on-disk content --
@@ -546,8 +573,8 @@ class AcpiEnabler:
         # the tree up front, since _quiet_umount() below only matches
         # the exact submount path it's unmounting.
         self._kill_chrooted(merged)
-        for mount in (merged / 'dev' / 'pts', merged / 'dev', merged / 'sys',
-                      merged / 'proc', merged, work):
+        for mount in (merged / 'var' / 'lib' / 'dkms', merged / 'dev' / 'pts', merged / 'dev',
+                      merged / 'sys', merged / 'proc', merged, work):
             self._quiet_umount(mount)
         subprocess.run(['sudo', 'sync'])
         try:
@@ -573,6 +600,43 @@ class AcpiEnabler:
             + ['chroot', str(self._build_merged), '/bin/bash', '-c', shell_command],
             self.verbose,
         )
+
+    def _ensure_host_dkms(self):
+        """Install dkms onto the real host root if it isn't already there.
+
+        `dkms` gets installed inside the DISPOSABLE build overlay too
+        (alongside base-devel, see install_acpi_call_module()), but
+        that copy is discarded along with the rest of the throwaway
+        toolchain the moment the overlay is torn down. Every dkms
+        invocation this class makes OUTSIDE the overlay -- the
+        idempotency check in _acpi_call_installed(), and the final
+        `dkms install` at the end of install_acpi_call_module() -- runs
+        against the real host, so `dkms` has to actually be present
+        there too, or those calls fail with a plain "dkms: command not
+        found" (seen on devices where dkms had never been installed on
+        the live root before). Unlike gcc/base-devel, dkms itself is a
+        small script/service package, not a couple-hundred-MB
+        toolchain, so it's fine to install it for real and keep it
+        rather than routing it through the disposable overlay too.
+
+        Raises:
+            RuntimeError: If dkms still isn't on PATH after attempting
+                to install it.
+        """
+        if shutil.which('dkms') is not None:
+            return
+        self._log('Installing dkms onto the real root (kept permanently -- it is small)')
+        self._ensure_pacman_keyring()
+        run_command(
+            ['sudo', 'pacman', '-S', 'dkms', '--dbpath', str(self.DB_PATH),
+             '--needed', '--overwrite', '*', '--noconfirm'],
+            self.verbose,
+        )
+        if shutil.which('dkms') is None:
+            self._die(
+                '"dkms" still not found on PATH after installing the dkms package -- '
+                'is this actually SteamOS/Arch-based?'
+            )
 
     # -------------------------------------------------------- acpi_call
     def install_acpi_call_module(self):
@@ -602,6 +666,8 @@ class AcpiEnabler:
                 overlay, or the final dkms install doesn't report
                 acpi_call as installed.
         """
+        self._ensure_host_dkms()
+
         kernel_release = platform.release()
         if self._acpi_call_installed(kernel_release):
             self._log('acpi_call already installed for %s' % kernel_release)
@@ -700,32 +766,31 @@ class AcpiEnabler:
                 )
                 return
 
-            # Copy just the two small, tiny artifacts dkms actually
-            # needs -- NOT the toolchain that built them -- from the
-            # overlay's upper layer back onto the real, live root.
-            self._log('Copying the built module back onto the real root')
+            # Only /usr/src needs copying back -- the tiny source +
+            # built-module tree, NOT the toolchain that built it, from
+            # the overlay's upper layer onto the real, live root.
+            # /var/lib/dkms needs no copy-back at all: it was bind
+            # mounted straight through to the real host for the whole
+            # build (see _setup_build_overlay()), so dkms's bookkeeping
+            # was already being written directly onto the real tree the
+            # entire time -- host_dkms_dir already holds the just-built
+            # state as-is.
+            self._log('Copying the built module source back onto the real root')
             host_src_dir.parent.mkdir(parents=True, exist_ok=True)
-            host_dkms_dir.parent.mkdir(parents=True, exist_ok=True)
             run_command(['sudo', 'rm', '-rf', str(host_src_dir)], self.verbose)
-            run_command(['sudo', 'rm', '-rf', str(host_dkms_dir)], self.verbose)
             run_command(
                 ['sudo', 'cp', '-a', str(chroot_src_dir), str(host_src_dir)], self.verbose,
             )
-            chroot_dkms_dir = self._build_merged / dkms_rel_path
-            if chroot_dkms_dir.is_dir():
-                run_command(
-                    ['sudo', 'cp', '-a', str(chroot_dkms_dir), str(host_dkms_dir)],
-                    self.verbose,
-                )
         finally:
             self._log('Tearing down the build overlay (freeing the toolchain space back)')
             self._teardown_build_overlay()
 
         # From here on, everything runs against the real root. dkms
-        # finds the copied-back /var/lib/dkms/acpi_call/<version> state
-        # already marked "built" for this exact kernel, so `dkms
-        # install` only copies the module into place + runs depmod --
-        # it never needs a compiler here.
+        # finds the /var/lib/dkms/acpi_call/<version> state -- already
+        # on the real root the whole time, via the bind mount set up in
+        # _setup_build_overlay() -- marked "built" for this exact
+        # kernel, so `dkms install` only copies the module into place
+        # + runs depmod -- it never needs a compiler here.
         self._log('Installing acpi_call %s' % version)
         run_command(
             ['sudo', 'dkms', 'install', '-m', self.ACPI_CALL_MODULE,
