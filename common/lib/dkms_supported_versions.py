@@ -32,12 +32,13 @@ Used by acpi_enabler.py to work out the exact linux-neptune kernel
 modules/headers package filenames matching the currently running kernel.
 
 get_remote_kernel_modules_path()/get_remote_kernel_headers_path() used to
-live here, building a URL against file_downloader.VALVE_PUBLIC_MIRROR (a
-single hardcoded Valve mirror). Removed: AcpiEnabler now resolves its
-download URLs itself, from the running system's own pacman.conf /
-mirrorlist (see AcpiEnabler._resolve_kernel_package_url()), the same
-approach NvidiaUsbImageBuilder.resolve_headers_url() uses against a
-mounted image's pacman.conf/mirrorlist — not a single hardcoded URL.
+live here, building a URL against a single hardcoded Valve mirror (the
+now-removed file_downloader.py module's VALVE_PUBLIC_MIRROR). Removed:
+AcpiEnabler now resolves its download URLs itself, from the running
+system's own pacman.conf / mirrorlist (see
+AcpiEnabler._resolve_kernel_package_url()), the same approach
+NvidiaUsbImageBuilder.resolve_headers_url() uses against a mounted
+image's pacman.conf/mirrorlist — not a single hardcoded URL.
 """
 
 import platform

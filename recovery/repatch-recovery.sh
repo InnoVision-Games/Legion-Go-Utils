@@ -9,7 +9,7 @@
 #     when booted from unrelated rescue media (it's normally populated
 #     relative to whichever image is currently running).
 #   - DRIVER_CONF can be overridden too, since the live environment's own
-#     root filesystem is typically read-only, so /usr/lib/steamos-nvidia/
+#     root filesystem is typically read-only, so /usr/lib/steamos-utils/
 #     can't be created there — point it at a writable copy instead
 #     (e.g. /tmp/driver.conf).
 #
@@ -27,7 +27,7 @@ die() { echo "[repatch] FAIL: $*" >&2; exit 1; }
 
 : "${ROOTDEV:=/dev/disk/by-partsets/$PARTSET/rootfs}"
 : "${EFIDEV:=/dev/disk/by-partsets/$PARTSET/efi}"
-: "${DRIVER_CONF:=/usr/lib/steamos-nvidia/driver.conf}"
+: "${DRIVER_CONF:=/usr/lib/steamos-utils/driver.conf}"
 log "Target: PARTSET=$PARTSET ROOTDEV=$ROOTDEV EFIDEV=$EFIDEV DRIVER_CONF=$DRIVER_CONF"
 [[ -b "$ROOTDEV" && -b "$EFIDEV" ]] || die "ROOTDEV/EFIDEV not found — pass them explicitly as env vars if by-partsets doesn't resolve here"
 [[ -r "$DRIVER_CONF" ]] || die "DRIVER_CONF ($DRIVER_CONF) not readable — copy it from the working slot first"
@@ -36,7 +36,7 @@ NEWROOT="$(mktemp -d /tmp/repatch-root.XXXXXX)"
 # SteamOS /home is ext4 with casefold enabled, which overlayfs rejects
 # as an upperdir — so the build workspace lives inside a plain ext4
 # loopback image on /home (space for the build, no casefold).
-WORKIMG=/home/.steamos-nvidia-work.img
+WORKIMG=/home/.steamos-utils-work.img
 WORK="$(mktemp -d /tmp/repatch-work.XXXXXX)"
 UPPER="$WORK/upper"; OVLWORK="$WORK/ovlwork"; MERGED="$WORK/merged"
 
@@ -167,7 +167,7 @@ chroot "$NEWROOT" depmod "$KVER"
 chroot "$NEWROOT" ldconfig
 
 cat > "$NEWROOT/etc/modprobe.d/99-nvidia-patch.conf" <<'EOF'
-# Added by steamos-nvidia repatch
+# Added by steamos-utils repatch
 blacklist nouveau
 options nouveau modeset=0
 options nvidia-drm modeset=1 fbdev=1
@@ -182,16 +182,16 @@ grep -q 'rd.driver.blacklist=nouveau' "$NEWROOT/etc/default/grub" \
 # propagate the self-healing machinery (repatch.sh + driver.conf) so
 # the NEXT update is covered too. Source paths are overridable for the
 # same reason DRIVER_CONF is: the live rescue environment has no
-# meaningful /usr/lib/steamos-nvidia or patched /usr/bin/steamos-update
+# meaningful /usr/lib/steamos-utils or patched /usr/bin/steamos-update
 # of its own to copy from — point these at the fixed copies instead
 # (see the recovery instructions).
-: "${SELFHEAL_SRC:=/usr/lib/steamos-nvidia}"
+: "${SELFHEAL_SRC:=/usr/lib/steamos-utils}"
 : "${UPDATE_WRAPPER_SRC:=/usr/bin/steamos-update}"
 [[ -d "$SELFHEAL_SRC" ]] || die "SELFHEAL_SRC ($SELFHEAL_SRC) not found"
 [[ -r "$UPDATE_WRAPPER_SRC" ]] || die "UPDATE_WRAPPER_SRC ($UPDATE_WRAPPER_SRC) not found"
-mkdir -p "$NEWROOT/usr/lib/steamos-nvidia"
-cp -a "$SELFHEAL_SRC/." "$NEWROOT/usr/lib/steamos-nvidia/"
-chmod 755 "$NEWROOT/usr/lib/steamos-nvidia/repatch.sh"
+mkdir -p "$NEWROOT/usr/lib/steamos-utils"
+cp -a "$SELFHEAL_SRC/." "$NEWROOT/usr/lib/steamos-utils/"
+chmod 755 "$NEWROOT/usr/lib/steamos-utils/repatch.sh"
 if [[ ! -f "$NEWROOT/usr/bin/steamos-update.orig" ]]; then
   mv "$NEWROOT/usr/bin/steamos-update" "$NEWROOT/usr/bin/steamos-update.orig"
 fi

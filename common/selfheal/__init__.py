@@ -23,20 +23,17 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-    file: nvidia_usb_image_builder/__init__.py
+    file: common/selfheal/__init__.py
 
-    Re-exports NvidiaUsbImageBuilder so `from nvidia_usb_image_builder
-    import NvidiaUsbImageBuilder` (as used by steam_os_utils.py) keeps
-    working unchanged now that this is a package directory
-    (nvidia_usb_image_builder/, holding nvidia_usb_image_builder.py and
-    install_to_hd.sh). The self-heal/repatch machinery this package
-    shares with AcpiEnabler (repatch_script.py, update_wrapper.py)
-    lives in the sibling common/selfheal/ subpackage instead -- see
-    common/__init__.py.
+    Marks common/selfheal/ as a package. Holds the on-device self-heal
+    PAYLOAD scripts shared by AcpiEnabler and NvidiaUsbImageBuilder --
+    repatch_script.py and update_wrapper.py -- both of which are shipped
+    as real standalone files and copied verbatim onto the target
+    filesystem (shutil.copy() against the REPATCH_SCRIPT /
+    UPDATE_WRAPPER_SCRIPT class constants), never imported as Python
+    modules in the normal sense. This is the deliberate counterpart to
+    common/lib/, which holds host-side helper modules that ARE imported
+    normally -- see common/__init__.py for the split.
 '''
 
-"""Package init: re-exports NvidiaUsbImageBuilder as the package's public API."""
-
-from .nvidia_usb_image_builder import NvidiaUsbImageBuilder
-
-__all__ = ['NvidiaUsbImageBuilder']
+"""Package init: common/selfheal/ holds the on-device self-heal payload scripts."""

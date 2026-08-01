@@ -28,6 +28,7 @@
 
 """Enables Linux DKMS ACPI calls on the running SteamOS system."""
 
+import json
 import os
 import platform
 import re
@@ -37,11 +38,10 @@ import sys
 import time
 from pathlib import Path
 
-from dkms_supported_versions import get_kernel_headers_filename
-from dkms_supported_versions import get_kernel_modules_filename
-from dkms_supported_versions import get_os_version
-from package_downloader import PackageDownloader
-from shell_utils import run_command
+from common.lib.dkms_supported_versions import get_kernel_headers_filename
+from common.lib.dkms_supported_versions import get_kernel_modules_filename
+from common.lib.dkms_supported_versions import get_os_version
+from common.lib.package_downloader import PackageDownloader
 
 
 class AcpiEnabler:
@@ -66,7 +66,7 @@ class AcpiEnabler:
     time. So the whole toolchain + build instead lives inside a
     disposable overlay backed by a loopback image on /home (which has
     real free space -- game storage), the exact same technique
-    repatch_script.py already uses on-device for the NVIDIA driver
+    common/selfheal/repatch_script.py already uses on-device for the NVIDIA driver
     build, just overlaid on the live root here instead of a mounted
     target partition. Only the resulting tiny build artifacts (the
     compiled module + its dkms bookkeeping) get copied back onto the
@@ -89,9 +89,9 @@ class AcpiEnabler:
     mirror-template approach NvidiaUsbImageBuilder.resolve_headers_url()
     uses against a mounted image's pacman.conf/mirrorlist, just read
     directly off the live filesystem here instead of a chroot. This
-    replaces the old file_downloader.check_mirror_and_download_package(),
-    which hit a single hardcoded Valve mirror URL with no atomic write
-    and no local caching.
+    replaces the old (now-removed) file_downloader.py's
+    check_mirror_and_download_package(), which hit a single hardcoded
+    Valve mirror URL with no atomic write and no local caching.
 
     Attributes:
         verbose: Whether underlying shell commands print their output.
@@ -135,13 +135,30 @@ class AcpiEnabler:
     BUILD_IMG_SIZE = '3G'
 
     # Same capability-bounding-set drop NvidiaUsbImageBuilder and
-    # repatch_script.py use for every chroot invocation: chroot() only
+    # common/selfheal/repatch_script.py use for every chroot invocation: chroot() only
     # changes the filesystem root, not the kernel/module/device
     # namespace, so a process inside the build chroot that calls
     # modprobe/insmod/rmmod or reboot(2) is still talking to this
     # machine's one real running kernel. Nothing the build legitimately
     # needs (compiling, dkms build/add) requires these.
     CHROOT_DROP_CAPS = 'setpriv --no-new-privs --bounding-set=-sys_module,-sys_boot,-sys_rawio'.split()
+
+    # Shared self-heal directory + repatch script -- the SAME ones
+    # NvidiaUsbImageBuilder._configure_selfheal_updates() uses (see that
+    # method, and common/selfheal/repatch_script.py's own module
+    # docstring). Reusing them rather than standing up a parallel
+    # acpi-only mechanism means one shared repatch.py already knows how
+    # to rebuild BOTH the NVIDIA driver and acpi_call, and a device that
+    # ends up with both features enabled only gets ONE set of wrapped
+    # update binaries, not two competing ones.
+    SELFHEAL_LIB_DIR = Path('/usr/lib/steamos-utils')
+    ACPI_CALL_CONF_PATH = SELFHEAL_LIB_DIR / 'acpi_call.json'
+    # .parent.parent: this file lives at acpi_enabler/acpi_enabler.py,
+    # so climbing one 'parent' only reaches acpi_enabler/ -- the second
+    # 'parent' reaches the project root, where common/ is a sibling.
+    _SELFHEAL_DIR = Path(__file__).resolve().parent.parent / 'common' / 'selfheal'
+    REPATCH_SCRIPT = _SELFHEAL_DIR / 'repatch_script.py'
+    UPDATE_WRAPPER_SCRIPT = _SELFHEAL_DIR / 'update_wrapper.py'
 
     _C_RESET = '\033[0m'
     _C_LOG = '\033[1;35m'     # magenta — [acpi-enabler] detail lines
@@ -189,14 +206,76 @@ class AcpiEnabler:
     def _die(self, message):
         raise RuntimeError('%s %s' % (self._colorize(self._C_FAIL, '[fail]'), message))
 
+    # -------------------------------------------------------- running commands
+    # Same _run()/_run_quiet() split NvidiaUsbImageBuilder uses (and for the
+    # same reason shell_utils.run_command() was retired project-wide):
+    # run_command() unconditionally printed a "Shell command failed" message
+    # on ANY non-zero exit, with no way to say "this one's allowed to fail,
+    # don't warn" -- exactly wrong for the several routine, expected-to-
+    # sometimes-fail checks in this class (mountpoint -q, an unmount that
+    # was never mounted, a dkms status query for a kernel that doesn't have
+    # it built yet). It also returned None on any failure instead of the
+    # real CompletedProcess, which several callers here need in order to
+    # inspect .stdout/.returncode even when check=False.
+    def _run(self, command, check=True):
+        """Run command, warning (but not raising) on an unexpected failure.
+
+        Args:
+            command: Argv list to execute.
+            check: If True (default), a non-zero exit or missing
+                executable is treated as unexpected and a warning is
+                printed. If False, failures are silent (see
+                _run_quiet()).
+
+        Returns:
+            The completed subprocess.CompletedProcess, or None if the
+            command's executable could not be found.
+        """
+        display = ' '.join(str(part) for part in command)
+        if self.verbose:
+            print('  $ %s' % display)
+        try:
+            result = subprocess.run(command, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            if check:
+                self._warn('command not found: %s (%s)' % (display, exc))
+            return None
+
+        if result.returncode != 0:
+            if check:
+                self._warn('command failed (exit %d): %s' % (result.returncode, display))
+                stderr = (result.stderr or '').strip()
+                for line in stderr.splitlines():
+                    print('      %s' % line, file=sys.stderr)
+        elif self.verbose:
+            stdout = (result.stdout or '').strip()
+            for line in stdout.splitlines():
+                print('      %s' % line)
+        return result
+
+    def _run_quiet(self, command):
+        """Run a command where a non-zero exit is a routine, expected outcome.
+
+        Examples: dkms status for a kernel that hasn't built it yet, an
+        unmount of something never mounted -- never warns on failure.
+
+        Args:
+            command: Argv list to execute.
+
+        Returns:
+            The completed subprocess.CompletedProcess, or None if the
+            command's executable could not be found.
+        """
+        return self._run(command, check=False)
+
     # -------------------------------------------------------------- steps
     def prep_steamos(self):
         self._log('Disabling SteamOS read-only filesystem')
-        run_command(['sudo', 'steamos-readonly', 'disable'], self.verbose)
+        self._run(['sudo', 'steamos-readonly', 'disable'])
 
     def finalize_steamos(self):
         self._log('Re-enabling SteamOS read-only filesystem')
-        run_command(['sudo', 'steamos-readonly', 'enable'], self.verbose)
+        self._run(['sudo', 'steamos-readonly', 'enable'])
 
     def _resolve_kernel_package_url(self, filename):
         """Resolve the download URL for a kernel modules/headers package.
@@ -288,8 +367,8 @@ class AcpiEnabler:
         if self.KEYRING_DIR.is_dir():
             return
         self._log('Initialising pacman keyring')
-        run_command(['sudo', 'pacman-key', '--init'], self.verbose)
-        run_command(['sudo', 'pacman-key', '--populate'], self.verbose)
+        self._run(['sudo', 'pacman-key', '--init'])
+        self._run(['sudo', 'pacman-key', '--populate'])
 
     def install_kernel_packages(self, modules_path, headers_path):
         """Install the downloaded kernel modules/headers packages via pacman.
@@ -309,13 +388,13 @@ class AcpiEnabler:
             self._die('Nothing to install — package resolution/download failed earlier')
             return
         self._ensure_pacman_keyring()
-        run_command(
+        self._run(
             [
                 'sudo', 'pacman', '-U', '--dbpath', str(self.DB_PATH),
                 # --needed: skip a package outright if the exact same
                 # version is already installed, instead of forcing a
                 # reinstall ("up to date -- reinstalling"). Matches the
-                # same flag NvidiaUsbImageBuilder/repatch_script.py
+                # same flag NvidiaUsbImageBuilder/common/selfheal/repatch_script.py
                 # already use for every pacman -U/-S call in the build
                 # chroot.
                 '--needed',
@@ -331,7 +410,6 @@ class AcpiEnabler:
                 '--overwrite', '*',
             ]
             + packages + ['--noconfirm'],
-            self.verbose,
         )
 
     def cleanup(self, modules_path, headers_path):
@@ -352,9 +430,10 @@ class AcpiEnabler:
             True if `dkms status` reports acpi_call as installed for
             kernel_release.
         """
-        result = run_command(
+        # _run_quiet: "not installed for this kernel yet" is the routine,
+        # expected outcome the very first time this runs, not a failure.
+        result = self._run_quiet(
             ['dkms', 'status', '-m', self.ACPI_CALL_MODULE, '-k', kernel_release],
-            self.verbose,
         )
         return bool(result and 'installed' in (result.stdout or ''))
 
@@ -368,11 +447,8 @@ class AcpiEnabler:
             RuntimeError: If the repo's tags can't be listed, or none of
                 them look like a release version.
         """
-        result = run_command(
-            ['git', 'ls-remote', '--tags', '--refs', self.ACPI_CALL_REPO],
-            self.verbose,
-        )
-        if result is None or not result.stdout:
+        result = self._run(['git', 'ls-remote', '--tags', '--refs', self.ACPI_CALL_REPO])
+        if result is None or result.returncode != 0 or not result.stdout:
             self._die('Could not list release tags for %s' % self.ACPI_CALL_REPO)
             return None
 
@@ -400,7 +476,7 @@ class AcpiEnabler:
         return best[1], best[2]
 
     # ------------------------------------------ disposable build overlay
-    # This whole section mirrors nvidia_usb_image_builder/repatch_script.py's
+    # This whole section mirrors common/selfheal/repatch_script.py's
     # proven overlay-chroot build machinery (same mount sequence, same
     # /proc/<pid>/root-based process killing instead of `fuser -km`, same
     # capability-dropped chroot) -- the only real difference is the
@@ -416,13 +492,14 @@ class AcpiEnabler:
         Returns:
             True if path is a mountpoint, False otherwise.
         """
-        return subprocess.run(['mountpoint', '-q', str(path)]).returncode == 0
+        result = self._run_quiet(['mountpoint', '-q', str(path)])
+        return result is not None and result.returncode == 0
 
     def _kill_chrooted(self, target):
         """Kill only processes actually chrooted into target.
 
         Matches via /proc/<pid>/root, never via fuser -km -- see
-        repatch_script.py's kill_chrooted() for why: target's dev/sys
+        common/selfheal/repatch_script.py's kill_chrooted() for why: target's dev/sys
         are --rbind mounts of this machine's REAL /dev and /sys (same
         inodes, not copies), so `fuser -km` against a path containing
         them can kill any process on the system with so much as
@@ -458,9 +535,10 @@ class AcpiEnabler:
             return
         self._kill_chrooted(path)
         time.sleep(0.2)
-        if subprocess.run(['sudo', 'umount', '-R', str(path)]).returncode == 0:
+        result = self._run_quiet(['sudo', 'umount', '-R', str(path)])
+        if result is not None and result.returncode == 0:
             return
-        subprocess.run(['sudo', 'umount', '-Rl', str(path)])
+        self._run_quiet(['sudo', 'umount', '-Rl', str(path)])
 
     def _setup_build_overlay(self):
         """Mount a disposable build overlay backed by a loop image on /home.
@@ -483,23 +561,22 @@ class AcpiEnabler:
         merged = work / 'merged'
 
         self.BUILD_IMG.unlink(missing_ok=True)
-        run_command(['sudo', 'truncate', '-s', self.BUILD_IMG_SIZE, str(self.BUILD_IMG)], self.verbose)
-        run_command(['sudo', 'mkfs.ext4', '-q', '-F', str(self.BUILD_IMG)], self.verbose)
-        run_command(['sudo', 'mount', '-o', 'loop', str(self.BUILD_IMG), str(work)], self.verbose)
+        self._run(['sudo', 'truncate', '-s', self.BUILD_IMG_SIZE, str(self.BUILD_IMG)])
+        self._run(['sudo', 'mkfs.ext4', '-q', '-F', str(self.BUILD_IMG)])
+        self._run(['sudo', 'mount', '-o', 'loop', str(self.BUILD_IMG), str(work)])
         for directory in (upper, ovlwork, merged):
             directory.mkdir(parents=True, exist_ok=True)
 
-        run_command(
+        self._run(
             ['sudo', 'mount', '-t', 'overlay', 'overlay', '-o',
              'index=off,lowerdir=/,upperdir=%s,workdir=%s' % (upper, ovlwork),
              str(merged)],
-            self.verbose,
         )
-        run_command(['sudo', 'mount', '-t', 'proc', 'proc', str(merged / 'proc')], self.verbose)
-        run_command(['sudo', 'mount', '--rbind', '/sys', str(merged / 'sys')], self.verbose)
-        run_command(['sudo', 'mount', '--make-rslave', str(merged / 'sys')], self.verbose)
-        run_command(['sudo', 'mount', '--rbind', '/dev', str(merged / 'dev')], self.verbose)
-        run_command(['sudo', 'mount', '--make-rslave', str(merged / 'dev')], self.verbose)
+        self._run(['sudo', 'mount', '-t', 'proc', 'proc', str(merged / 'proc')])
+        self._run(['sudo', 'mount', '--rbind', '/sys', str(merged / 'sys')])
+        self._run(['sudo', 'mount', '--make-rslave', str(merged / 'sys')])
+        self._run(['sudo', 'mount', '--rbind', '/dev', str(merged / 'dev')])
+        self._run(['sudo', 'mount', '--make-rslave', str(merged / 'dev')])
 
         # dkms's bookkeeping tree at /var/lib/dkms has to be the REAL,
         # persistent one on the host, not whatever lowerdir=/ resolves
@@ -522,11 +599,8 @@ class AcpiEnabler:
         host_dkms_root = Path('/var/lib/dkms')
         host_dkms_root.mkdir(parents=True, exist_ok=True)
         chroot_dkms_root = merged / 'var' / 'lib' / 'dkms'
-        run_command(['sudo', 'mkdir', '-p', str(chroot_dkms_root)], self.verbose)
-        run_command(
-            ['sudo', 'mount', '--bind', str(host_dkms_root), str(chroot_dkms_root)],
-            self.verbose,
-        )
+        self._run(['sudo', 'mkdir', '-p', str(chroot_dkms_root)])
+        self._run(['sudo', 'mount', '--bind', str(host_dkms_root), str(chroot_dkms_root)])
 
         # /etc/resolv.conf on a systemd-based system is almost always a
         # symlink into /run/systemd/resolve/... , and /run is a tmpfs --
@@ -538,7 +612,7 @@ class AcpiEnabler:
         # symlink and replace it with a real copy of the resolved
         # content instead.
         resolv = merged / 'etc' / 'resolv.conf'
-        run_command(['sudo', 'rm', '-f', str(resolv)], self.verbose)
+        self._run(['sudo', 'rm', '-f', str(resolv)])
         try:
             shutil.copy('/etc/resolv.conf', resolv)
         except OSError:
@@ -576,7 +650,7 @@ class AcpiEnabler:
         for mount in (merged / 'var' / 'lib' / 'dkms', merged / 'dev' / 'pts', merged / 'dev',
                       merged / 'sys', merged / 'proc', merged, work):
             self._quiet_umount(mount)
-        subprocess.run(['sudo', 'sync'])
+        self._run(['sudo', 'sync'])
         try:
             work.rmdir()
         except OSError:
@@ -585,20 +659,23 @@ class AcpiEnabler:
         self._build_work = None
         self._build_merged = None
 
-    def _in_build_chroot(self, shell_command):
+    def _in_build_chroot(self, shell_command, check=True):
         """Run shell_command inside the build overlay chroot.
 
         Args:
             shell_command: The shell command line to run.
+            check: Forwarded to _run() -- False for status checks where a
+                non-zero exit is a routine, expected outcome (see
+                install_acpi_call_module()'s dkms status check below).
 
         Returns:
-            The completed subprocess.CompletedProcess on success, or
-            None if it failed (see shell_utils.run_command()).
+            The completed subprocess.CompletedProcess, or None if the
+            command could not be executed at all.
         """
-        return run_command(
+        return self._run(
             self.CHROOT_DROP_CAPS
             + ['chroot', str(self._build_merged), '/bin/bash', '-c', shell_command],
-            self.verbose,
+            check=check,
         )
 
     def _ensure_host_dkms(self):
@@ -627,10 +704,9 @@ class AcpiEnabler:
             return
         self._log('Installing dkms onto the real root (kept permanently -- it is small)')
         self._ensure_pacman_keyring()
-        run_command(
+        self._run(
             ['sudo', 'pacman', '-S', 'dkms', '--dbpath', str(self.DB_PATH),
              '--needed', '--overwrite', '*', '--noconfirm'],
-            self.verbose,
         )
         if shutil.which('dkms') is None:
             self._die(
@@ -671,7 +747,7 @@ class AcpiEnabler:
         kernel_release = platform.release()
         if self._acpi_call_installed(kernel_release):
             self._log('acpi_call already installed for %s' % kernel_release)
-            run_command(['sudo', 'modprobe', self.ACPI_CALL_MODULE], self.verbose)
+            self._run(['sudo', 'modprobe', self.ACPI_CALL_MODULE])
             return
 
         if shutil.which('git') is None:
@@ -695,10 +771,10 @@ class AcpiEnabler:
         # directory".
         if host_src_dir.exists():
             self._warn('Removing stale leftover %s from an earlier attempt' % host_src_dir)
-            run_command(['sudo', 'rm', '-rf', str(host_src_dir)], self.verbose)
+            self._run(['sudo', 'rm', '-rf', str(host_src_dir)])
         if host_dkms_dir.exists():
             self._warn('Removing stale leftover %s from an earlier attempt' % host_dkms_dir)
-            run_command(['sudo', 'rm', '-rf', str(host_dkms_dir)], self.verbose)
+            self._run(['sudo', 'rm', '-rf', str(host_dkms_dir)])
 
         self._log('Setting up disposable build overlay on %s' % self.BUILD_IMG)
         self._setup_build_overlay()
@@ -706,10 +782,9 @@ class AcpiEnabler:
             chroot_src_dir = self._build_merged / module_rel_path
 
             self._log('Fetching acpi_call %s' % tag)
-            run_command(
+            self._run(
                 ['sudo', 'git', 'clone', '--depth', '1', '--branch', tag,
                  self.ACPI_CALL_REPO, str(chroot_src_dir)],
-                self.verbose,
             )
             if not chroot_src_dir.is_dir():
                 self._die('Clone of %s failed' % self.ACPI_CALL_REPO)
@@ -755,8 +830,12 @@ class AcpiEnabler:
                 % (self.ACPI_CALL_MODULE, version, self.ACPI_CALL_MODULE, version, kernel_release)
             )
 
+            # check=False: the failure path right below already handles
+            # and reports this explicitly, so this shouldn't also print
+            # its own separate "command failed" warning on top of that.
             built_check = self._in_build_chroot(
-                'dkms status -m %s -v %s -k %s' % (self.ACPI_CALL_MODULE, version, kernel_release)
+                'dkms status -m %s -v %s -k %s' % (self.ACPI_CALL_MODULE, version, kernel_release),
+                check=False,
             )
             if built_check is None or 'built' not in (built_check.stdout or ''):
                 self._die(
@@ -777,10 +856,8 @@ class AcpiEnabler:
             # state as-is.
             self._log('Copying the built module source back onto the real root')
             host_src_dir.parent.mkdir(parents=True, exist_ok=True)
-            run_command(['sudo', 'rm', '-rf', str(host_src_dir)], self.verbose)
-            run_command(
-                ['sudo', 'cp', '-a', str(chroot_src_dir), str(host_src_dir)], self.verbose,
-            )
+            self._run(['sudo', 'rm', '-rf', str(host_src_dir)])
+            self._run(['sudo', 'cp', '-a', str(chroot_src_dir), str(host_src_dir)])
         finally:
             self._log('Tearing down the build overlay (freeing the toolchain space back)')
             self._teardown_build_overlay()
@@ -792,10 +869,9 @@ class AcpiEnabler:
         # kernel, so `dkms install` only copies the module into place
         # + runs depmod -- it never needs a compiler here.
         self._log('Installing acpi_call %s' % version)
-        run_command(
+        self._run(
             ['sudo', 'dkms', 'install', '-m', self.ACPI_CALL_MODULE,
              '-v', version, '-k', kernel_release],
-            self.verbose,
         )
 
         if not self._acpi_call_installed(kernel_release):
@@ -804,7 +880,7 @@ class AcpiEnabler:
             return
 
         self._log('Loading acpi_call module')
-        run_command(['sudo', 'modprobe', self.ACPI_CALL_MODULE], self.verbose)
+        self._run(['sudo', 'modprobe', self.ACPI_CALL_MODULE])
 
         # dkms keeps the built module around across kernel updates, but
         # something still has to load it at boot -- modules-load.d is
@@ -812,13 +888,94 @@ class AcpiEnabler:
         modules_load_conf = Path('/etc/modules-load.d/acpi_call.conf')
         modules_load_conf.write_text(self.ACPI_CALL_MODULE + '\n')
 
+    # ------------------------------------------------------- self-heal
+    def _configure_selfheal_updates(self):
+        """Make acpi_call survive future OS updates (self-healing).
+
+        A SteamOS update doesn't patch the running root -- it stages a
+        whole new OS image into the OTHER partition set and reboots
+        into it, so acpi_call (installed here only onto the CURRENTLY
+        running slot) would simply be gone after the next update,
+        exactly like the NVIDIA driver would be without
+        NvidiaUsbImageBuilder's selfheal mode. This sets up the exact
+        same fix, applied live instead of at image-build time: writes
+        acpi_call.json (the module name + upstream repo repatch.py
+        needs to rebuild it), makes sure the shared repatch.py is
+        installed, and wraps whichever real update entry points exist
+        on this device (steamos-update always; steamos-update-os and
+        steamos-atomupd-client if present -- matches
+        NvidiaUsbImageBuilder._configure_selfheal_updates()'s reasoning
+        for wrapping all three: an update triggered through any one of
+        them must not skip the self-heal machinery).
+
+        If NvidiaUsbImageBuilder's own selfheal machinery is already
+        installed on this device (from a prior NVIDIA-patched image),
+        this only adds acpi_call.json alongside the existing
+        driver.json -- the wrapper and repatch.py are shared, so
+        nothing about the NVIDIA side is touched or duplicated.
+
+        Raises:
+            RuntimeError: If repatch_script.py or update_wrapper.py is
+                missing from this project's own install (should ship
+                under common/).
+        """
+        self._log('Installing self-healing update machinery for acpi_call')
+        self.SELFHEAL_LIB_DIR.mkdir(parents=True, exist_ok=True)
+
+        self.ACPI_CALL_CONF_PATH.write_text(json.dumps({
+            'comment': 'Written by AcpiEnabler at enable time. repatch.py rebuilds '
+                       'acpi_call from this info after each OS update.',
+            'module': self.ACPI_CALL_MODULE,
+            'repo': self.ACPI_CALL_REPO,
+        }, indent=2) + '\n')
+
+        if not self.REPATCH_SCRIPT.exists():
+            self._die('%s is missing -- reinstall/redownload SteamOS-Utils '
+                       '(repatch_script.py should ship under common/)'
+                       % self.REPATCH_SCRIPT)
+            return
+
+        if not self.UPDATE_WRAPPER_SCRIPT.exists():
+            self._die('%s is missing -- reinstall/redownload SteamOS-Utils '
+                       '(update_wrapper.py should ship under common/)'
+                       % self.UPDATE_WRAPPER_SCRIPT)
+            return
+
+        # Always refresh: this project ships exactly one repatch.py, so
+        # copying it is idempotent regardless of whether NvidiaUsbImageBuilder
+        # already installed one first -- either way the device ends up
+        # with the current, up-to-date script that knows how to handle
+        # BOTH payloads.
+        repatch_path = self.SELFHEAL_LIB_DIR / 'repatch.py'
+        shutil.copy(self.REPATCH_SCRIPT, repatch_path)
+        repatch_path.chmod(0o755)
+
+        for name in ('steamos-update', 'steamos-update-os', 'steamos-atomupd-client'):
+            binpath = Path('/usr/bin') / name
+            if name != 'steamos-update' and not binpath.exists():
+                continue
+            origpath = Path('/usr/bin') / (name + '.orig')
+            if not origpath.exists() and binpath.exists():
+                # First device to wrap this entry point -- preserve the
+                # real binary. If it's already wrapped (orig already
+                # exists, e.g. from a prior NvidiaUsbImageBuilder
+                # selfheal setup), leave the preserved original alone
+                # and just refresh the wrapper content below.
+                shutil.move(str(binpath), str(origpath))
+            elif not origpath.exists():
+                continue
+            shutil.copy(self.UPDATE_WRAPPER_SCRIPT, binpath)
+            binpath.chmod(0o755)
+
     def enable(self):
         """Run the full enable flow.
 
         Disables read-only, downloads + installs the kernel
         modules/headers packages matching the running kernel, builds
-        and registers the acpi_call DKMS module against them, then
-        restores read-only and cleans up the downloaded packages.
+        and registers the acpi_call DKMS module against them, installs
+        the self-healing update machinery so it survives future OS
+        updates, then restores read-only and cleans up the downloaded
+        packages.
 
         Raises:
             RuntimeError: If any step fails (e.g. required packages
@@ -829,5 +986,113 @@ class AcpiEnabler:
         modules_path, headers_path = self.download_kernel_packages()
         self.install_kernel_packages(modules_path, headers_path)
         self.install_acpi_call_module()
+        self._configure_selfheal_updates()
         self.finalize_steamos()
         self.cleanup(modules_path, headers_path)
+
+    # ------------------------------------------------------------ disable
+    def _unload_acpi_call_module(self):
+        """Unload acpi_call from the running kernel and stop loading it at boot.
+
+        Best-effort: acpi_call may not currently be loaded (e.g. after a
+        reboot before disable() was run), which is not an error here.
+        """
+        self._log('Unloading acpi_call module')
+        self._run_quiet(['sudo', 'modprobe', '-r', self.ACPI_CALL_MODULE])
+
+        modules_load_conf = Path('/etc/modules-load.d/acpi_call.conf')
+        if modules_load_conf.exists():
+            self._run_quiet(['sudo', 'rm', '-f', str(modules_load_conf)])
+
+    def _remove_acpi_call_dkms(self):
+        """Unregister acpi_call from dkms for every version it's built as.
+
+        Parses `dkms status -m acpi_call` rather than assuming the
+        latest upstream release tag (_resolve_acpi_call_version()) is
+        what's actually installed -- a device can be running an older
+        built version than whatever's currently tagged upstream.
+        Best-effort/non-fatal per version, same reasoning as everywhere
+        else acpi_call is treated as an optional convenience feature
+        that must never block the rest of an operation.
+        """
+        result = self._run_quiet(['dkms', 'status', '-m', self.ACPI_CALL_MODULE])
+        if result is None or not result.stdout:
+            return
+        versions = sorted(set(re.findall(r'^%s/([^,]+),' % re.escape(self.ACPI_CALL_MODULE),
+                                          result.stdout, re.M)))
+        for version in versions:
+            self._log('Removing acpi_call %s from dkms' % version)
+            self._run_quiet(
+                ['sudo', 'dkms', 'remove', '-m', self.ACPI_CALL_MODULE, '-v', version, '--all'],
+            )
+
+    def _teardown_selfheal_updates(self):
+        """Undo _configure_selfheal_updates(), scoped to acpi_call only.
+
+        Always removes ACPI_CALL_CONF_PATH. The shared machinery
+        (repatch.py, the wrapped update binaries) is only torn down if
+        NVIDIA driver self-heal isn't ALSO configured on this device
+        (i.e. DRIVER_CONF_PATH doesn't exist) -- see
+        common/selfheal/repatch_script.py's DRIVER_CONF_PATH -- since
+        NvidiaUsbImageBuilder's own self-heal depends on that exact same
+        machinery and must keep working if this device has both features
+        enabled. When acpi_call was the only payload configured, this
+        restores the real steamos-update/steamos-update-os/
+        steamos-atomupd-client binaries from their preserved <name>.orig
+        backups and removes repatch.py, leaving the device exactly as it
+        was before self-heal was ever installed.
+        """
+        try:
+            self.ACPI_CALL_CONF_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+        driver_conf_path = self.SELFHEAL_LIB_DIR / 'driver.json'
+        if driver_conf_path.exists():
+            self._log('NVIDIA driver self-heal is still configured on this device -- '
+                       'leaving the shared update wrapper and repatch.py in place')
+            return
+
+        self._log('acpi_call was the only self-heal payload configured -- '
+                   'removing the update wrapper entirely')
+        for name in ('steamos-update', 'steamos-update-os', 'steamos-atomupd-client'):
+            binpath = Path('/usr/bin') / name
+            origpath = Path('/usr/bin') / (name + '.orig')
+            if not origpath.exists():
+                continue
+            shutil.move(str(origpath), str(binpath))
+            binpath.chmod(0o755)
+
+        repatch_path = self.SELFHEAL_LIB_DIR / 'repatch.py'
+        try:
+            repatch_path.unlink()
+        except FileNotFoundError:
+            pass
+
+        try:
+            self.SELFHEAL_LIB_DIR.rmdir()
+        except OSError:
+            # Not empty (e.g. driver.json raced back in, or some other
+            # file lives there) or doesn't exist -- either way, nothing
+            # more to do here.
+            pass
+
+    def disable(self):
+        """Undo enable(): remove acpi_call and, if it's the last payload, self-heal.
+
+        Idempotent and safe to run even if acpi_call was never enabled
+        (each step no-ops or logs a best-effort warning rather than
+        raising) or if NVIDIA driver self-heal is also configured on
+        this device, in which case the shared update wrapper and
+        repatch.py are deliberately left alone.
+        """
+        if not self.ACPI_CALL_CONF_PATH.exists():
+            self._log('acpi_call self-heal is not configured on this device -- nothing to disable')
+            return
+
+        self._log('Disabling ACPI calls')
+        self.prep_steamos()
+        self._unload_acpi_call_module()
+        self._remove_acpi_call_dkms()
+        self._teardown_selfheal_updates()
+        self.finalize_steamos()

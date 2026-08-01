@@ -1,7 +1,7 @@
 '''
     MIT License
 
-    Copyright (c) 2026 InnoVision Games
+    Copyright (c) 2025 InnoVision Games
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -34,8 +34,11 @@
     pure Python. Operations that are inherently OS/root-level (loop
     devices, btrfs, overlayfs mounts, chroot, pacman, rsync, dkms) are
     still shelled out via subprocess, through this class's own quiet
-    _run()/_run_quiet() wrappers (see the note near their definitions for
-    why those don't reuse shell_utils.run_command).
+    _run()/_run_quiet() wrappers (see the note near their definitions).
+    AcpiEnabler carries the identical pair of methods for the same
+    reason -- this project's original shared shell_utils.run_command()
+    helper was retired project-wide once it became clear every real
+    caller needed this same check=True/False split.
 '''
 
 """Builds a self-healing NVIDIA-patched SteamOS USB installer image."""
@@ -54,21 +57,17 @@ import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
-# PackageDownloader is a top-level sibling of steam_os_utils.py (shared
-# with AcpiEnabler — see that module for why), not part of this package,
-# so this is an absolute import rather than a relative one.
-from package_downloader import PackageDownloader
+# PackageDownloader lives in the shared common/lib/ subpackage (imported
+# normally by AcpiEnabler too — see common/__init__.py for why it's kept
+# apart from common/selfheal/'s on-device payload scripts).
+from common.lib.package_downloader import PackageDownloader
 
-from .update_wrapper_script_builder import UpdateWrapperScriptBuilder
-
-# Note: this module intentionally does NOT use shell_utils.run_command for
-# its shell-outs. That helper unconditionally prints a command's stdout and
-# stderr — fine for the simple, rare commands the other modules in this
-# project run, but this builder shells out constantly (mount, blkid,
-# pacman, rsync, ...) and many of those calls are routine status checks
-# where a non-zero exit is normal. Printing every one of them produced a
-# wall of blank lines and scary-looking "failures" for things that weren't
-# actually wrong. See _run()/_run_quiet() below instead.
+# Note: this module shells out constantly (mount, blkid, pacman, rsync,
+# ...) and many of those calls are routine status checks where a
+# non-zero exit is normal -- see _run()/_run_quiet() below, which warn
+# only on an UNEXPECTED failure (check=True, the default) and stay
+# silent for routine ones (check=False). AcpiEnabler uses the identical
+# pair of methods for the same reason.
 
 socket.setdefaulttimeout(10)
 
@@ -150,28 +149,28 @@ class NvidiaUsbImageBuilder:
         'nvidia-drm.modeset=1 nvidia-drm.fbdev=1'
     )
 
-    # Unlike the update wrapper (update_wrapper_script_builder.py), neither
-    # install_to_hd.sh nor repatch.py takes any build-time value from this
-    # class that actually varies — repatch.py's CMDLINE_ADD/BUILD_ONLY_RE/
-    # DRIVER_CONF_PATH are always the same fixed values this class itself
-    # uses, so there was nothing being templated. Both ship as real
-    # standalone scripts alongside this file instead of generated Python
-    # strings; install_one_click_installer() / _configure_selfheal_updates()
-    # just copy them into the image verbatim.
+    # None of install_to_hd.sh, repatch.py, or update_wrapper.py takes any
+    # build-time value from this class that actually varies — their
+    # constants (CMDLINE_ADD/BUILD_ONLY_RE/DRIVER_CONF_PATH, and the
+    # wrapper's own installed name, recovered at runtime from argv[0])
+    # are always the same fixed values this class itself uses, so there
+    # was nothing being templated. install_to_hd.sh ships alongside this
+    # file; repatch.py and update_wrapper.py ship in the shared
+    # common/selfheal/ subpackage (see common/__init__.py) since
+    # AcpiEnabler needs the exact same scripts -- install_one_click_installer() /
+    # _configure_selfheal_updates() just copy them into the image verbatim.
     INSTALL_TO_HD_SCRIPT = Path(__file__).resolve().parent / 'install_to_hd.sh'
-    REPATCH_SCRIPT = Path(__file__).resolve().parent / 'repatch_script.py'
-    # Same treatment as the two above: edid_hdr_patch.py takes no
-    # build-time value that varies per build, so it ships as a real
-    # standalone script rather than a generated string. Unlike the two
-    # above, it MUST run on the target machine rather than the build
-    # host — see its module docstring for why — so what gets installed
-    # at build time is only the script itself plus a systemd unit that
-    # runs it on every boot of the *installed* system.
-    EDID_PATCH_SCRIPT = Path(__file__).resolve().parent / 'edid_hdr_patch.py'
+    # .parent.parent: this file lives at
+    # nvidia_usb_image_builder/nvidia_usb_image_builder.py, so climbing
+    # one 'parent' only reaches nvidia_usb_image_builder/ -- the second
+    # 'parent' reaches the project root, where common/ is a sibling.
+    _SELFHEAL_DIR = Path(__file__).resolve().parent.parent / 'common' / 'selfheal'
+    REPATCH_SCRIPT = _SELFHEAL_DIR / 'repatch_script.py'
+    UPDATE_WRAPPER_SCRIPT = _SELFHEAL_DIR / 'update_wrapper.py'
 
     def __init__(self, image_path=None, driver_spec='latest', update_mode='selfheal',
                  add_installer=True, trim_cuda=False, skip_sigcheck=False,
-                 workdir=None, verbose=False, output_path=None, edid_hdr_safety=True):
+                 workdir=None, verbose=False, output_path=None):
         """Initialize the builder.
 
         Args:
@@ -192,18 +191,6 @@ class NvidiaUsbImageBuilder:
                 runs.
             output_path: Path for the built installer image. Defaults to
                 the input image's filename with "-nvidia" appended.
-            edid_hdr_safety: Whether to install the on-device EDID HDR
-                safety net (default True). Works around a confirmed
-                NVIDIA driver bug where 4K+ resolutions combined with
-                ~120Hz+ refresh AND HDR corrupt the display under
-                gamescope-session, by neutralizing just that
-                combination in the connected monitor's advertised
-                EDID — full native resolution and lower-refresh HDR
-                both keep working. Independent of update_mode; this
-                runs on the machine the image gets INSTALLED to, not
-                the build host, since those are routinely different
-                hardware. See edid_hdr_patch.py's module docstring for
-                the mechanism and its known limitations.
         """
         self.image_path = image_path
         self.driver_spec = driver_spec
@@ -212,7 +199,6 @@ class NvidiaUsbImageBuilder:
         self.trim_cuda = trim_cuda
         self.skip_sigcheck = skip_sigcheck
         self.verbose = verbose
-        self.edid_hdr_safety = edid_hdr_safety
 
         self.workdir = Path(workdir) if workdir else None
         # If not given, resolve_image_path() defaults this to the input
@@ -245,13 +231,6 @@ class NvidiaUsbImageBuilder:
         self.pkg_urls = []
         self.pkg_files = []
         self.new_packages = []
-
-        # Source generator for the on-device update wrapper, kept as its
-        # own class (see update_wrapper_script_builder.py) rather than a
-        # method here, since it genuinely varies per binary_name. repatch.py
-        # has no such per-call variation (see REPATCH_SCRIPT above), so it
-        # ships as a real file instead of needing a generator class here.
-        self._update_wrapper_builder = UpdateWrapperScriptBuilder()
 
     # ------------------------------------------------------------ logging
     # Kept close to the coloring the original bash script used
@@ -298,13 +277,11 @@ class NvidiaUsbImageBuilder:
             self._log('%s done (%.1fs)' % (name, time.time() - started))
 
     # -------------------------------------------------------- running commands
-    # Deliberately NOT shell_utils.run_command here: it unconditionally
-    # prints a command's stdout and stderr (even when both are empty), which
-    # is what produced the wall of blank lines and scary-looking tracebacks
-    # for perfectly routine, expected-to-sometimes-fail checks (mountpoint
-    # -q, readelf on a non-ELF file, etc). This stays quiet unless a command
-    # both fails AND was expected to succeed (check=True, the default), or
-    # --nvidia_verbose was passed.
+    # Stays quiet for perfectly routine, expected-to-sometimes-fail checks
+    # (mountpoint -q, readelf on a non-ELF file, etc) -- only warns when a
+    # command both fails AND was expected to succeed (check=True, the
+    # default), or prints its output at all when --nvidia_verbose was
+    # passed. AcpiEnabler carries an identical _run()/_run_quiet() pair.
     def _run(self, command, check=True):
         """Run command, warning (but not raising) on an unexpected failure.
 
@@ -1186,97 +1163,6 @@ class NvidiaUsbImageBuilder:
         self._run(self._chroot_argv(self.mnt, 'systemctl', 'enable',
                                      'nvidia-suspend', 'nvidia-resume', 'nvidia-hibernate'))
 
-    # ------------------------------------------------------- EDID HDR fix
-    EDID_UNIT_NAME = 'steamos-nvidia-edid-patch.service'
-
-    def configure_edid_hdr_safety(self):
-        """Install the on-device EDID HDR safety net (see edid_hdr_safety).
-
-        Copies edid_hdr_patch.py into the image and enables a oneshot
-        systemd unit that runs it on every boot of the INSTALLED system
-        (not this build). Deliberately does nothing at build time beyond
-        that — the script itself decides what (if anything) needs
-        patching, based on whatever monitor is actually connected when
-        the target machine boots.
-
-        Raises:
-            RuntimeError: If edid_hdr_patch.py is missing from this
-                project's own install.
-        """
-        if not self.edid_hdr_safety:
-            return
-
-        if not self.EDID_PATCH_SCRIPT.exists():
-            self._die('%s is missing — reinstall/redownload SteamOS-Utils '
-                       '(edid_hdr_patch.py should ship next to nvidia_usb_image_builder.py)'
-                       % self.EDID_PATCH_SCRIPT)
-
-        self._log('Installing EDID HDR safety net (4K+HDR+~120Hz+ NVIDIA/gamescope workaround)')
-        lib_dir = self.mnt / 'usr' / 'lib' / 'steamos-nvidia'
-        lib_dir.mkdir(parents=True, exist_ok=True)
-        script_path = lib_dir / 'edid_hdr_patch.py'
-        shutil.copy(self.EDID_PATCH_SCRIPT, script_path)
-        script_path.chmod(0o755)
-
-        unit_path = self.mnt / 'usr' / 'lib' / 'systemd' / 'system' / self.EDID_UNIT_NAME
-        unit_path.parent.mkdir(parents=True, exist_ok=True)
-        unit_path.write_text(self._edid_unit_contents())
-
-        # Deliberately NOT `systemctl enable` here (unlike the
-        # nvidia-suspend/resume/hibernate enable a few lines up in
-        # configure_modprobe, which predates this method and hasn't been
-        # touched). Confirmed the hard way: `systemctl enable` run inside
-        # a plain chroot() -- no booted systemd, no live /run tmpfs, no
-        # /etc/machine-id -- can report success (exit 0) while silently
-        # NOT writing the *.wants symlink, since its offline-enable path
-        # depends on some of that environment being present. This matches
-        # why steamos-finish-oobe-migration.service is masked a few
-        # methods below via a raw symlink_to() rather than
-        # `systemctl mask`: for exactly this class of environment, a
-        # direct symlink write is the reliable primitive, not the
-        # systemctl wrapper around it.
-        wants_dir = self.mnt / 'etc' / 'systemd' / 'system' / 'multi-user.target.wants'
-        wants_dir.mkdir(parents=True, exist_ok=True)
-        enabled_link = wants_dir / self.EDID_UNIT_NAME
-        if enabled_link.exists() or enabled_link.is_symlink():
-            enabled_link.unlink()
-        enabled_link.symlink_to('/usr/lib/systemd/system/%s' % self.EDID_UNIT_NAME)
-
-    def _edid_unit_contents(self):
-        """Build the systemd unit that runs edid_hdr_patch.py at boot.
-
-        Runs early (after udev has settled, so /sys/class/drm/*/edid is
-        actually populated) and before the graphical session, since the
-        script may trigger a one-time reboot to apply a changed kernel
-        cmdline and that's much less disruptive before Game Mode has
-        started than after.
-
-        NOTE: Before=display-manager.service is a best-effort ordering
-        constraint. It has not been confirmed against SteamOS's actual
-        boot target names for Game Mode (gamescope-session may not go
-        through a conventional display-manager.service the way a desktop
-        distro does) — worth verifying on real hardware and adjusting if
-        the unit isn't actually running early enough in practice.
-
-        Returns:
-            The full systemd unit file contents, as a string.
-        """
-        return (
-            '[Unit]\n'
-            'Description=steamos-nvidia EDID HDR safety net (4K+HDR+high-refresh NVIDIA workaround)\n'
-            'After=systemd-udev-settle.service local-fs.target\n'
-            'Before=display-manager.service\n'
-            'ConditionPathExists=/usr/lib/steamos-nvidia/edid_hdr_patch.py\n'
-            '\n'
-            '[Service]\n'
-            'Type=oneshot\n'
-            'ExecStart=/usr/bin/python3 /usr/lib/steamos-nvidia/edid_hdr_patch.py\n'
-            'RemainAfterExit=yes\n'
-            '\n'
-            '[Install]\n'
-            'WantedBy=multi-user.target\n'
-        )
-
     # ------------------------------------------------------ update modes
     def configure_update_strategy(self):
         """Configure the image's update-mode behavior (selfheal/hold/stock).
@@ -1333,12 +1219,12 @@ class NvidiaUsbImageBuilder:
         every update entry point that actually exists in the image.
 
         Raises:
-            RuntimeError: If repatch_script.py is missing from this
-                project's own install (should ship next to
-                nvidia_usb_image_builder.py).
+            RuntimeError: If repatch_script.py or update_wrapper.py is
+                missing from this project's own install (should ship
+                under common/).
         """
         self._log('Installing self-healing update machinery')
-        lib_dir = self.mnt / 'usr' / 'lib' / 'steamos-nvidia'
+        lib_dir = self.mnt / 'usr' / 'lib' / 'steamos-utils'
         lib_dir.mkdir(parents=True, exist_ok=True)
 
         # JSON, not a bash-sourceable driver.conf: repatch.py (below) is
@@ -1354,8 +1240,13 @@ class NvidiaUsbImageBuilder:
 
         if not self.REPATCH_SCRIPT.exists():
             self._die('%s is missing — reinstall/redownload SteamOS-Utils '
-                       '(repatch_script.py should ship next to nvidia_usb_image_builder.py)'
+                       '(repatch_script.py should ship under common/selfheal/)'
                        % self.REPATCH_SCRIPT)
+
+        if not self.UPDATE_WRAPPER_SCRIPT.exists():
+            self._die('%s is missing — reinstall/redownload SteamOS-Utils '
+                       '(update_wrapper.py should ship under common/selfheal/)'
+                       % self.UPDATE_WRAPPER_SCRIPT)
 
         repatch_path = lib_dir / 'repatch.py'
         shutil.copy(self.REPATCH_SCRIPT, repatch_path)
@@ -1386,7 +1277,7 @@ class NvidiaUsbImageBuilder:
             origpath = self.mnt / 'usr' / 'bin' / (name + '.orig')
             if not origpath.exists() and binpath.exists():
                 shutil.move(str(binpath), str(origpath))
-            binpath.write_text(self._update_wrapper_builder.render(name))
+            shutil.copy(self.UPDATE_WRAPPER_SCRIPT, binpath)
             binpath.chmod(0o755)
 
     # ---------------------------------------------------------- cmdline
@@ -1557,35 +1448,11 @@ class NvidiaUsbImageBuilder:
             if not (self.mnt / 'usr' / 'bin' / 'steamos-update.orig').exists():
                 self._die('original steamos-update not preserved')
 
-            lib_dir = self.mnt / 'usr' / 'lib' / 'steamos-nvidia'
+            lib_dir = self.mnt / 'usr' / 'lib' / 'steamos-utils'
             if not (lib_dir / 'repatch.py').exists():
                 self._die('repatch.py missing')
             if not (lib_dir / 'driver.json').exists():
                 self._die('driver.json missing')
-
-        if self.edid_hdr_safety:
-            if not (self.mnt / 'usr' / 'lib' / 'steamos-nvidia' / 'edid_hdr_patch.py').exists():
-                self._die('edid_hdr_patch.py missing')
-            unit = self.mnt / 'usr' / 'lib' / 'systemd' / 'system' / self.EDID_UNIT_NAME
-            if not unit.exists():
-                self._die('%s missing' % self.EDID_UNIT_NAME)
-            enabled_link = (self.mnt / 'etc' / 'systemd' / 'system'
-                             / 'multi-user.target.wants' / self.EDID_UNIT_NAME)
-            # is_symlink() + readlink(), NOT exists(): the link's target
-            # is an ABSOLUTE path ('/usr/lib/systemd/system/<unit>'),
-            # correct once the built image actually boots, but exists()
-            # on a symlink follows it and resolves that absolute path
-            # against the CALLING process's own root — the build host,
-            # not self.mnt — so it was reporting a perfectly good
-            # symlink as broken just because the host itself doesn't
-            # happen to have that exact path. Checking the link's own
-            # target string sidesteps that host-vs-image root mismatch
-            # entirely.
-            expected_target = '/usr/lib/systemd/system/%s' % self.EDID_UNIT_NAME
-            if not enabled_link.is_symlink():
-                self._die('%s not enabled' % self.EDID_UNIT_NAME)
-            elif os.readlink(str(enabled_link)) != expected_target:
-                self._die('%s enabled but points to an unexpected target' % self.EDID_UNIT_NAME)
 
     def sync_and_finalize(self):
         """Flush the mounted partitions and restore the btrfs read-only property."""
@@ -1797,9 +1664,6 @@ class NvidiaUsbImageBuilder:
                 self.compute_payload,
                 self.install_payload,
                 self.configure_modprobe,
-            )),
-            ('Installing EDID HDR safety net', (
-                self.configure_edid_hdr_safety,
             )),
             ('Configuring update strategy (%s)' % self.update_mode, (
                 self.configure_update_strategy,

@@ -1,5 +1,5 @@
 #!/bin/bash
-# steamos-nvidia repatch — rebuild + install the NVIDIA driver into
+# steamos-utils repatch — rebuild + install the NVIDIA driver into
 # another partition set (normally "other"), right after an OS update
 # staged it there. Run as root. Idempotent: exits 0 immediately if the
 # slot already has the driver for its kernel. Logs to stdout (the
@@ -18,7 +18,7 @@ NEWROOT="$(mktemp -d /tmp/repatch-root.XXXXXX)"
 # SteamOS /home is ext4 with casefold enabled, which overlayfs rejects
 # as an upperdir — so the build workspace lives inside a plain ext4
 # loopback image on /home (space for the build, no casefold).
-WORKIMG=/home/.steamos-nvidia-work.img
+WORKIMG=/home/.steamos-utils-work.img
 WORK="$(mktemp -d /tmp/repatch-work.XXXXXX)"
 UPPER="$WORK/upper"; OVLWORK="$WORK/ovlwork"; MERGED="$WORK/merged"
 
@@ -105,7 +105,7 @@ in_chroot "pacman -S --noconfirm --needed dkms"
 
 # Driver = the exact pinned Arch packages this image was built with
 # (NOT the slot's frozen repo — that only has Valve's older driver).
-source /usr/lib/steamos-nvidia/driver.conf
+source /usr/lib/steamos-utils/driver.conf
 [[ -n "${PKG_URLS:-}" ]] || die "driver.conf has no PKG_URLS"
 log "Installing pinned driver $DRIVER_VERSION"
 in_chroot "mkdir -p /tmp/nvpkgs"
@@ -149,7 +149,7 @@ chroot "$NEWROOT" depmod "$KVER"
 chroot "$NEWROOT" ldconfig
 
 cat > "$NEWROOT/etc/modprobe.d/99-nvidia-patch.conf" <<'EOF'
-# Added by steamos-nvidia repatch
+# Added by steamos-utils repatch
 blacklist nouveau
 options nouveau modeset=0
 options nvidia-drm modeset=1 fbdev=1
@@ -163,8 +163,8 @@ grep -q 'rd.driver.blacklist=nouveau' "$NEWROOT/etc/default/grub" \
 
 # propagate the self-healing machinery (repatch.sh + driver.conf) so
 # the NEXT update is covered too
-mkdir -p "$NEWROOT/usr/lib/steamos-nvidia"
-cp -a /usr/lib/steamos-nvidia/. "$NEWROOT/usr/lib/steamos-nvidia/"
+mkdir -p "$NEWROOT/usr/lib/steamos-utils"
+cp -a /usr/lib/steamos-utils/. "$NEWROOT/usr/lib/steamos-utils/"
 if [[ ! -f "$NEWROOT/usr/bin/steamos-update.orig" ]]; then
   mv "$NEWROOT/usr/bin/steamos-update" "$NEWROOT/usr/bin/steamos-update.orig"
   cp -a /usr/bin/steamos-update "$NEWROOT/usr/bin/steamos-update"

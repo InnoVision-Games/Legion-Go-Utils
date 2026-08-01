@@ -36,13 +36,14 @@ import argparse
 import sys
 
 from acpi_enabler import AcpiEnabler
-from legion_go2_brightness_slider import enable_lego2_brightness_slider
-from legion_go2_brightness_slider import remove_lego2_brightness_slider
+from legion import enable_lego2_brightness_slider
+from legion import remove_lego2_brightness_slider
 from nvidia_usb_image_builder import NvidiaUsbImageBuilder
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='A set of tools for devices running SteamOS')
     parser.add_argument('-acpi', '--enable_acpi_calls', action='store_true', help='Enable Linux Dynamic Kernel Module Support ACPI calls')
+    parser.add_argument('-removeacpi', '--disable_acpi_calls', action='store_true', help='Disable and remove Linux Dynamic Kernel Module Support ACPI calls (and the shared update wrapper, if acpi_call was the only self-heal payload configured)')
     parser.add_argument('-lego2brightness', '--enable_lego2_brightness_slider', action='store_true', help='Enable Legion Go 2 Brightness Slider and Color correction Fix')
     parser.add_argument('-removelego2brightness', '--remove_lego2_brightness_slider', action='store_true', help='Disable and remove Legion Go 2 Brightness Slider and Color Correction Fix')
 
@@ -77,6 +78,13 @@ if __name__ == '__main__':
         acpi_enabler = AcpiEnabler()
         try:
             acpi_enabler.enable()
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+    if args.disable_acpi_calls:
+        acpi_enabler = AcpiEnabler()
+        try:
+            acpi_enabler.disable()
         except RuntimeError as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)

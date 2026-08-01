@@ -25,24 +25,46 @@ one-click USB installer flow described below.
 
 ```
 steam_os_utils.py                    Entry point / CLI
-acpi_enabler.py                      AcpiEnabler — DKMS ACPI call enabler
-legion_go2_brightness_slider.py      Legion Go 2 brightness slider fix (stub)
-package_downloader.py                PackageDownloader — shared, hardened
-                                      download helper (atomic, cache-aware)
-dkms_supported_versions.py           Kernel version / package filename helpers
-shell_utils.py                       Shared run_command() helper
-file_downloader.py                   Legacy downloader, unused, kept for
-                                      reference
+acpi_enabler/                        AcpiEnabler — DKMS ACPI call enabler
+                                      (acpi_call), with self-healing updates
+    __init__.py                      Re-exports AcpiEnabler
+    acpi_enabler.py                  AcpiEnabler — the class itself
+legion/                              Legion-hardware-specific fixes
+    __init__.py                      Re-exports the brightness slider fix
+                                      functions
+    legion_go2_brightness_slider.py  Legion Go 2 brightness slider fix (stub)
 nvidia_usb_image_builder/            NVIDIA USB installer image builder
     __init__.py                      Re-exports NvidiaUsbImageBuilder
     nvidia_usb_image_builder.py      NvidiaUsbImageBuilder — the build itself
-    update_wrapper_script_builder.py Generates the on-device self-heal
-                                      update wrapper(s)
-    repatch_script.py                Standalone on-device script
-                                      (installed as repatch.py) that rebuilds
-                                      the driver after an OS update
     install_to_hd.sh                 Standalone one-click installer script
                                       shipped inside the built image
+common/                              Umbrella package over two subpackages of
+                                      shared code, kept apart deliberately:
+    __init__.py                      Package marker
+    selfheal/                        On-device self-heal PAYLOAD scripts,
+                                      shared by AcpiEnabler and
+                                      NvidiaUsbImageBuilder — shipped as real
+                                      standalone files and copied verbatim
+                                      onto the target filesystem, never
+                                      imported as Python modules
+        __init__.py                  Package marker
+        update_wrapper.py            Standalone on-device script (installed
+                                      under steamos-update /
+                                      steamos-update-os /
+                                      steamos-atomupd-client) that runs the
+                                      real updater then triggers repatch.py
+        repatch_script.py            Standalone on-device script (installed
+                                      as repatch.py) that rebuilds whichever
+                                      of the NVIDIA driver / acpi_call are
+                                      configured after an OS update, into the
+                                      freshly staged slot
+    lib/                             Shared HOST-SIDE Python helper modules,
+                                      imported normally by AcpiEnabler and/or
+                                      NvidiaUsbImageBuilder
+        __init__.py                  Package marker
+        package_downloader.py        PackageDownloader — shared, hardened
+                                      download helper (atomic, cache-aware)
+        dkms_supported_versions.py   Kernel version / package filename helpers
 recovery/                            Manual disaster-recovery scripts for
                                       use from rescue/live media
 ```
@@ -61,7 +83,14 @@ sudo python3 steam_os_utils.py -h
 Downloads the linux-neptune kernel modules + headers packages matching the
 *currently running* kernel (resolved from the live system's own
 `/etc/pacman.conf` and mirrorlist) and installs them via pacman, bracketed
-by disabling/re-enabling `steamos-readonly`.
+by disabling/re-enabling `steamos-readonly`; builds and registers the
+`acpi_call` DKMS module (built from source inside a disposable overlay, so
+none of the toolchain it needs ever permanently touches root's limited free
+space); and installs the same self-healing update machinery
+`-build_nvidia_usb`'s `selfheal` mode uses, so `acpi_call` survives future OS
+updates automatically (rebuilt into each newly staged slot by the shared
+`repatch.py` — see "Update modes explained" below, which now covers both
+payloads).
 
 ```bash
 sudo python3 steam_os_utils.py -acpi
@@ -73,6 +102,25 @@ Equivalently from Python:
 from acpi_enabler import AcpiEnabler
 
 AcpiEnabler().enable()
+```
+
+To remove it again -- unloads the module, unregisters it from dkms, and
+undoes the self-healing update wrapper (restoring the real
+`steamos-update`/`steamos-update-os`/`steamos-atomupd-client` binaries and
+deleting `repatch.py`) *unless* NVIDIA driver self-heal is also configured
+on this device, in which case the shared wrapper and `repatch.py` are left
+in place since `-build_nvidia_usb`'s selfheal mode still needs them:
+
+```bash
+sudo python3 steam_os_utils.py -removeacpi
+```
+
+Equivalently from Python:
+
+```python
+from acpi_enabler import AcpiEnabler
+
+AcpiEnabler().disable()
 ```
 
 ### Legion Go 2 brightness slider fix
@@ -214,6 +262,14 @@ sudo /home/deck/tools/install_to_hd.sh system
   updates are blocked outright rather than healed.
 - **`stock`**: no self-heal machinery is installed at all — a future OS
   update will remove the NVIDIA driver.
+
+`repatch.py` and the wrapped update binaries are shared with `-acpi`'s own
+self-healing setup (both write into the same `/usr/lib/steamos-utils/`
+directory). A device with both features enabled gets exactly one set of wrapped update
+binaries, not two competing ones; `repatch.py` rebuilds whichever of
+`driver.json` (NVIDIA) / `acpi_call.json` (`acpi_call`) it finds, and each
+is independently idempotent, so having only one of the two configured never
+requires or affects the other.
 
 ### Manual disaster recovery
 

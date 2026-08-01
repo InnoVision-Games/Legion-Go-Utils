@@ -23,20 +23,21 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-    file: nvidia_usb_image_builder/__init__.py
+    file: legion/__init__.py
 
-    Re-exports NvidiaUsbImageBuilder so `from nvidia_usb_image_builder
-    import NvidiaUsbImageBuilder` (as used by steam_os_utils.py) keeps
-    working unchanged now that this is a package directory
-    (nvidia_usb_image_builder/, holding nvidia_usb_image_builder.py and
-    install_to_hd.sh). The self-heal/repatch machinery this package
-    shares with AcpiEnabler (repatch_script.py, update_wrapper.py)
-    lives in the sibling common/selfheal/ subpackage instead -- see
-    common/__init__.py.
+    Re-exports the Legion Go 2 brightness slider fix functions so
+    `from legion import enable_lego2_brightness_slider,
+    remove_lego2_brightness_slider` (as used by steam_os_utils.py) has a
+    stable import path. Named "legion" rather than mirroring the module
+    filename (unlike acpi_enabler/, nvidia_usb_image_builder/) since this
+    package is meant to hold Legion-hardware-specific fixes generally,
+    not just this one brightness-slider stub -- future Legion-family
+    quirks can live alongside it here without another top-level rename.
 '''
 
-"""Package init: re-exports NvidiaUsbImageBuilder as the package's public API."""
+"""Package init: re-exports the Legion Go 2 brightness slider fix functions."""
 
-from .nvidia_usb_image_builder import NvidiaUsbImageBuilder
+from .legion_go2_brightness_slider import enable_lego2_brightness_slider
+from .legion_go2_brightness_slider import remove_lego2_brightness_slider
 
-__all__ = ['NvidiaUsbImageBuilder']
+__all__ = ['enable_lego2_brightness_slider', 'remove_lego2_brightness_slider']

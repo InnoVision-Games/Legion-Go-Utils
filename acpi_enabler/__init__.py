@@ -23,20 +23,17 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-    file: nvidia_usb_image_builder/__init__.py
+    file: acpi_enabler/__init__.py
 
-    Re-exports NvidiaUsbImageBuilder so `from nvidia_usb_image_builder
-    import NvidiaUsbImageBuilder` (as used by steam_os_utils.py) keeps
-    working unchanged now that this is a package directory
-    (nvidia_usb_image_builder/, holding nvidia_usb_image_builder.py and
-    install_to_hd.sh). The self-heal/repatch machinery this package
-    shares with AcpiEnabler (repatch_script.py, update_wrapper.py)
-    lives in the sibling common/selfheal/ subpackage instead -- see
-    common/__init__.py.
+    Re-exports AcpiEnabler so `from acpi_enabler import AcpiEnabler` (as
+    used by steam_os_utils.py) keeps working unchanged now that this is a
+    package directory (acpi_enabler/, holding acpi_enabler.py) instead of
+    a single flat module -- matching the nvidia_usb_image_builder/
+    package's own layout/rationale.
 '''
 
-"""Package init: re-exports NvidiaUsbImageBuilder as the package's public API."""
+"""Package init: re-exports AcpiEnabler as the package's public API."""
 
-from .nvidia_usb_image_builder import NvidiaUsbImageBuilder
+from .acpi_enabler import AcpiEnabler
 
-__all__ = ['NvidiaUsbImageBuilder']
+__all__ = ['AcpiEnabler']
