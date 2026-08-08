@@ -32,7 +32,7 @@ acpi_enabler/                        AcpiEnabler — DKMS ACPI call enabler
 legion/                              Legion-hardware-specific fixes
     __init__.py                      Re-exports the brightness slider fix
                                       functions
-    legion_go2_brightness_slider.py  Legion Go 2 brightness slider fix (stub)
+    legion_go2_brightness_slider.py  Legion Go 2 brightness slider fix
 nvidia_usb_image_builder/            NVIDIA USB installer image builder
     __init__.py                      Re-exports NvidiaUsbImageBuilder
     nvidia_usb_image_builder.py      NvidiaUsbImageBuilder — the build itself
@@ -126,7 +126,11 @@ AcpiEnabler().disable()
 ### Legion Go 2 brightness slider fix
 
 Enables (or removes) the Legion Go 2 brightness slider and color-correction
-fix. These are currently stub implementations pending the real fix logic.
+fix, by writing (or removing) a gamescope known-display Lua script that
+registers the Legion Go 2's OLED panel colorimetry and dynamic refresh
+rates at `/home/deck/.config/gamescope/scripts/lenovo.legiongo2.oled.lua`.
+See [this Reddit post](https://www.reddit.com/r/LegionGo/comments/1s4mhlu/legion_go_2_steamos_display_fixes_color_banding/)
+for background on the fix itself.
 
 ```bash
 sudo python3 steam_os_utils.py -lego2brightness

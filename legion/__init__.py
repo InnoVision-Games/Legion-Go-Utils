@@ -31,7 +31,7 @@
     stable import path. Named "legion" rather than mirroring the module
     filename (unlike acpi_enabler/, nvidia_usb_image_builder/) since this
     package is meant to hold Legion-hardware-specific fixes generally,
-    not just this one brightness-slider stub -- future Legion-family
+    not just this one brightness-slider fix -- future Legion-family
     quirks can live alongside it here without another top-level rename.
 '''
 
