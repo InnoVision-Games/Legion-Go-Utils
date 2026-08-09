@@ -1443,7 +1443,12 @@ class NvidiaUsbImageBuilder:
 
         if self.update_mode == 'selfheal':
             wrapper = self.mnt / 'usr' / 'bin' / 'steamos-update'
-            if not wrapper.exists() or 'self-healing' not in wrapper.read_text():
+            # Checks for a distinctive string actually present in
+            # update_wrapper.py's own header/docstring -- 'self-healing'
+            # never appears there (only 'self-heal'), so this check
+            # failed on every selfheal build regardless of whether the
+            # wrapper was installed correctly.
+            if not wrapper.exists() or 'steamos-utils update wrapper' not in wrapper.read_text():
                 self._die('update wrapper missing')
             if not (self.mnt / 'usr' / 'bin' / 'steamos-update.orig').exists():
                 self._die('original steamos-update not preserved')
